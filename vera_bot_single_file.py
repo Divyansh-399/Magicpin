@@ -15,7 +15,7 @@ gracefully. Every getter here returns a safe default instead of KeyError.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -53,27 +53,6 @@ def digest_by_id(category: dict, item_id: Optional[str]) -> Optional[dict]:
 
 def digest_by_kind(category: dict, kind: str) -> list[dict]:
     return [d for d in (g(category, "digest", default=[]) or []) if d.get("kind") == kind]
-
-
-def freshest_digest_for_trigger(category: dict, trigger: dict, *kinds: str) -> Optional[dict]:
-    """Resolve a trigger to its supplied digest item, then to a fresh relevant item.
-
-    Phase 3 of the official harness replaces category contexts with newly
-    injected digest entries.  Falling back to the last matching entry lets a
-    known trigger family benefit from that newer context without assuming a
-    seed-only identifier or inventing a citation.
-    """
-    payload = g(trigger, "payload", default={}) or {}
-    for key in ("top_item_id", "digest_item_id", "item_id", "source_item_id"):
-        item = digest_by_id(category, payload.get(key))
-        if item:
-            return item
-    wanted = {kind.lower() for kind in kinds if kind}
-    matches = [
-        item for item in (g(category, "digest", default=[]) or [])
-        if str(item.get("kind", "")).lower() in wanted
-    ]
-    return matches[-1] if matches else None
 
 
 def seasonal_beat_for_month(category: dict, month_abbr: str) -> Optional[dict]:
@@ -187,20 +166,6 @@ def customer_wants_code_mix(customer: dict) -> bool:
 def customer_pure_hindi(customer: dict) -> bool:
     pref = (g(customer, "identity", "language_pref", default="") or "").lower()
     return pref == "hi"
-
-
-def customer_has_consent(customer: Optional[dict], required_scope: Optional[str | Iterable[str]]) -> bool:
-    """Return whether a customer has consent for a trigger's outreach purpose.
-
-    Customer triggers are not sufficient proof of consent: the judge can inject
-    new customer contexts specifically to verify that outreach respects the
-    consent scope supplied with that customer.
-    """
-    if not customer or not required_scope:
-        return False
-    scopes = g(customer, "consent", "scope", default=[]) or []
-    required = {required_scope} if isinstance(required_scope, str) else set(required_scope)
-    return bool(required & set(scopes))
 
 
 # ---------------------------------------------------------------------------
@@ -336,21 +301,6 @@ def _sentence(text: str) -> str:
     return text
 
 
-def _sentence_lead_lower(text: str) -> str:
-    """Lowercase only the leading character, for gluing a title onto a prior
-    clause (e.g. '...trial found: {title}'). Deliberately does NOT lower()
-    the whole string: a blanket .lower() mangles any acronym appearing
-    anywhere in the title (RCT, DCI, GST, FSSAI, ...), which real research/
-    compliance digest titles routinely contain -- and which a freshly
-    judge-injected Phase-3 digest item is especially likely to contain,
-    since we can't predict its exact wording in advance. Every other family
-    that glues a digest title into prose (fam_regulation_change,
-    fam_cde_opportunity) already keeps the title verbatim; this brings
-    fam_research_digest in line with that instead of being the one place
-    that silently lowercases embedded acronyms."""
-    return (text[:1].lower() + text[1:]) if text else text
-
-
 def _default_template_params(merchant: dict, customer: Optional[dict]) -> list[str]:
     if customer:
         return [customer_first_name(customer), merchant_display_name(merchant)]
@@ -393,7 +343,7 @@ def customer_lang(category: dict, customer: dict) -> Lang:
 # ---------------------------------------------------------------------------
 
 def fam_research_digest(category, merchant, trigger, customer):
-    item = freshest_digest_for_trigger(category, trigger, "research")
+    item = digest_by_id(category, g(trigger, "payload", "top_item_id"))
     name = owner_salutation(merchant, category)
     L = merchant_lang(category, merchant)
 
@@ -407,7 +357,7 @@ def fam_research_digest(category, merchant, trigger, customer):
         n_clause = f"{n:,}-patient trial" if n else "recent study"
         body = (
             f"{name}, this week's {category.get('display_name', category.get('slug'))} digest "
-            f"landed{segment_note}. {n_clause.capitalize()} found: {_sentence_lead_lower(item.get('title', ''))}. "
+            f"landed{segment_note}. {n_clause.capitalize()} found: {item.get('title', '').lower()}. "
             f"Worth a 2-min look — {item.get('source', '')}. "
             f"{L.want('Draft ek patient-ed WhatsApp bana doon jo aap share kar sakein?', 'Should I put together a patient-ed WhatsApp you can send out?')}"
         )
@@ -429,7 +379,7 @@ def fam_research_digest(category, merchant, trigger, customer):
 
 
 def fam_cde_opportunity(category, merchant, trigger, customer):
-    item = freshest_digest_for_trigger(category, trigger, "cde", "training")
+    item = digest_by_id(category, g(trigger, "payload", "digest_item_id"))
     name = owner_salutation(merchant, category)
     credits = g(trigger, "payload", "credits")
     fee = g(trigger, "payload", "fee", default="").replace("_", " ")
@@ -449,7 +399,7 @@ def fam_cde_opportunity(category, merchant, trigger, customer):
 
 
 def fam_regulation_change(category, merchant, trigger, customer):
-    item = freshest_digest_for_trigger(category, trigger, "compliance", "regulation")
+    item = digest_by_id(category, g(trigger, "payload", "top_item_id"))
     name = owner_salutation(merchant, category)
     deadline = g(trigger, "payload", "deadline_iso")
     if item:
@@ -950,30 +900,13 @@ def fam_customer_lapsed(category, merchant, trigger, customer, hard: bool):
     cname = customer_first_name(customer) if customer else "there"
     mname = merchant_display_name(merchant)
     L = customer_lang(category, customer) if customer else Lang(False)
-    payload = g(trigger, "payload", default={}) or {}
+    last_visit = g(customer, "relationship", "last_visit") if customer else None
     offers = active_offers(merchant)
     offer = offers[0]["title"] if offers else None
-
-    # Prefer the trigger's own real, freshest field when it's actually
-    # present (e.g. trg_015_winback_rashmi ships payload.days_since_last_visit
-    # directly) rather than deriving an approximation from last_visit vs.
-    # trigger.expires_at -- expires_at is when the trigger LAPSES, not "now"
-    # (compose() has no direct access to the tick's clock), so that derived
-    # number was only ever a rough proxy and could drift from the real gap.
-    day_source = None
     days = None
-    real_days = payload.get("days_since_last_visit")
-    if isinstance(real_days, (int, float)) and not is_placeholder_payload(trigger):
-        days = int(real_days)
-        day_source = "trigger.payload.days_since_last_visit (real, freshest)"
-    else:
-        last_visit = g(customer, "relationship", "last_visit") if customer else None
-        if last_visit:
-            approx = days_between(last_visit, trigger.get("expires_at"))
-            if approx is not None:
-                days = approx
-                day_source = "approximated from customer.relationship.last_visit vs. trigger.expires_at (payload had no direct day count)"
-
+    if last_visit:
+        exp = trigger.get("expires_at")
+        days = days_between(last_visit, exp)
     miss_clause = f" — it's been about {days} days since your last visit" if days else ""
     if hard:
         body = (
@@ -991,7 +924,7 @@ def fam_customer_lapsed(category, merchant, trigger, customer, hard: bool):
             + f"{opener} "
             + closing
         )
-    rationale = (f"{'Hard' if hard else 'Soft'}-lapse winback; day count from {day_source or 'unresolvable — omitted rather than guessed'}, "
+    rationale = (f"{'Hard' if hard else 'Soft'}-lapse winback; real last_visit-derived day count when resolvable, "
                  f"real active offer ({'yes: ' + offer if offer else 'none — fell back to a plain re-engagement ask'}), "
                  "customer language_pref honored for code-mix. Single binary-leaning CTA.")
     return {"body": body, "cta": "binary" if offer else "open_ended", "rationale": rationale,
@@ -1088,29 +1021,6 @@ def fam_wedding_package_followup(category, merchant, trigger, customer):
 # generic fallback — any kind not explicitly handled, or total data drought
 # ---------------------------------------------------------------------------
 
-def _fallback_anchor(category: dict, trigger: dict) -> tuple[str, str]:
-    """Return a human-readable, verifiable anchor for a novel trigger.
-
-    This deliberately reads only explicit, display-safe fields.  It gives
-    post-submission trigger kinds a grounded route without leaking enum names
-    or turning arbitrary payload keys into merchant-facing jargon.
-    """
-    item = freshest_digest_for_trigger(category, trigger)
-    if item and item.get("title"):
-        source = f" Source: {item['source']}." if item.get("source") else ""
-        return _sentence(str(item["title"])) + source, "new category digest item"
-
-    payload = g(trigger, "payload", default={}) or {}
-    for key in ("headline", "title", "event_name", "topic", "service_due"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return _sentence(value.replace("_", " ")), f"trigger payload.{key}"
-
-    metric, delta = payload.get("metric"), payload.get("delta_pct")
-    if isinstance(metric, str) and isinstance(delta, (int, float)):
-        return (f"{metric.replace('_', ' ')} changed {fmt_pct(delta)} over {payload.get('window', 'the latest window')}."), "trigger metric"
-    return "", ""
-
 def _generic_fallback(category, merchant, trigger, customer):
     """Used only for a trigger `kind` this composer has never seen. We
     deliberately do NOT expose the raw internal kind string to the merchant
@@ -1121,29 +1031,19 @@ def _generic_fallback(category, merchant, trigger, customer):
     if customer:
         cname = customer_first_name(customer)
         mname = merchant_display_name(merchant)
-        anchor, source = _fallback_anchor(category, trigger)
-        if anchor:
-            body = f"Hi {cname}, a quick update from {mname}: {anchor} Would you like us to help with the next step?"
-        else:
-            body = f"Hi {cname}, quick note from {mname} — wanted to check in with you. Anything I can help with?"
+        body = f"Hi {cname}, quick note from {mname} — wanted to check in with you. Anything I can help with?"
         rationale = (f"Unrecognized customer-scope trigger kind '{trigger.get('kind')}' — no matching family "
                      "handler. Deliberately did NOT surface the raw kind string in the merchant-facing body "
-                     f"(that would be an internal-jargon leak); used {source or 'a safe generic check-in'} instead.")
+                     "(that would be an internal-jargon leak); kept the message warm and generically useful instead.")
     else:
         name = owner_salutation(merchant, category)
-        anchor, source = _fallback_anchor(category, trigger)
-        offer = active_offers(merchant)
-        offer_clause = f" I can shape the next step around your active {offer[0]['title']}." if offer else ""
-        if anchor:
-            body = f"{name}, a fresh update worth acting on: {anchor}{offer_clause} Should I turn this into a simple draft for you?"
-        else:
-            # ground in whatever real signal exists so this isn't purely generic,
-            # but phrase it in plain language rather than the raw signal string
-            sig = (g(merchant, "signals", default=[]) or [None])[0]
-            sig_clause = " — something worth looking at on your listing" if sig else ""
-            body = f"{name}, quick check-in{sig_clause}. Got a minute to talk through it?"
+        # ground in whatever real signal exists so this isn't purely generic,
+        # but phrase it in plain language rather than the raw signal string
+        sig = (g(merchant, "signals", default=[]) or [None])[0]
+        sig_clause = f" — something worth looking at on your listing" if sig else ""
+        body = f"{name}, quick check-in{sig_clause}. Got a minute to talk through it?"
         rationale = (f"Unrecognized merchant-scope trigger kind '{trigger.get('kind')}' — no matching family "
-                     f"handler. Grounded in {source or 'the presence/absence of a real merchant signal'}, but phrased "
+                     "handler. Grounded in the presence/absence of a real merchant.signals entry, but phrased "
                      "in plain language rather than exposing the raw signal string or kind name to the merchant.")
     return {"body": body, "cta": "open_ended", "rationale": rationale}
 
@@ -1279,15 +1179,6 @@ def _looks_hindi_ish(text: str) -> bool:
 def _contains_any(text: str, phrases: list[str]) -> bool:
     low = text.lower()
     return any(p in low for p in phrases)
-
-
-def is_auto_reply_message(text: str) -> bool:
-    """Public, deterministic auto-reply classifier used across conversations.
-
-    The official replay may issue each repeated WA-Business reply under a new
-    conversation id, so per-conversation state alone is not enough.
-    """
-    return _contains_any(_normalize(text), AUTO_REPLY_PHRASES)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,7 +1370,6 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 
@@ -1506,20 +1396,6 @@ SUPPRESSION_TTL_SECONDS = 24 * 3600  # don't re-fire the same suppression_key wi
 # trigger_id -> set of (merchant_id, customer_id) already actioned, so a tick
 # never re-proposes a brand new conversation for a trigger already handled
 TRIGGERED_ALREADY: set[tuple[str, str]] = set()
-
-# merchant/message -> count.  The official auto-reply replay deliberately
-# changes conversation_id between repeated WA-Business replies.
-AUTO_REPLY_FINGERPRINTS: dict[tuple[str, str], int] = {}
-
-CONSENT_BY_TRIGGER_KIND = {
-    "recall_due": "recall_reminders",
-    "appointment_tomorrow": "appointment_reminders",
-    "chronic_refill_due": ("refill_reminders", "delivery_notifications"),
-    "customer_lapsed_soft": ("winback_offers", "promotional_offers"),
-    "customer_lapsed_hard": ("winback_offers", "promotional_offers"),
-    "trial_followup": ("kids_program_updates", "program_updates", "treatment_followup"),
-    "wedding_package_followup": ("bridal_package_followup", "promotional_offers"),
-}
 
 
 def _get_ctx(scope: str, context_id: str) -> Optional[dict]:
@@ -1594,11 +1470,8 @@ VALID_SCOPES = {"category", "merchant", "customer", "trigger"}
 @app.post("/v1/context")
 async def push_context(body: CtxBody):
     if body.scope not in VALID_SCOPES:
-        return JSONResponse(status_code=400, content={
-            "accepted": False,
-            "reason": "invalid_scope",
-            "details": f"scope must be one of {sorted(VALID_SCOPES)}",
-        })
+        return {"accepted": False, "reason": "invalid_scope",
+                "details": f"scope must be one of {sorted(VALID_SCOPES)}"}
 
     key = (body.scope, body.context_id)
     cur = CONTEXTS.get(key)
@@ -1609,9 +1482,10 @@ async def push_context(body: CtxBody):
                 "stored_at": datetime.now(timezone.utc).isoformat()}
 
     if cur and cur["version"] > body.version:
-        return JSONResponse(status_code=409, content={
-            "accepted": False, "reason": "stale_version", "current_version": cur["version"],
-        })
+        raise HTTPException(
+            status_code=409,
+            detail={"accepted": False, "reason": "stale_version", "current_version": cur["version"]},
+        )
 
     CONTEXTS[key] = {"version": body.version, "payload": body.payload}
     return {"accepted": True, "ack_id": f"ack_{body.context_id}_v{body.version}",
@@ -1671,10 +1545,6 @@ async def tick(body: TickBody):
         customer = _get_ctx("customer", customer_id) if customer_id else None
         if trigger.get("scope") == "customer" and not customer:
             continue  # customer-scope trigger with no customer context pushed yet
-        if trigger.get("scope") == "customer":
-            consent_scope = CONSENT_BY_TRIGGER_KIND.get(trigger.get("kind"))
-            if not customer_has_consent(customer, consent_scope):
-                continue  # customer exists, but has not opted into this outreach purpose
 
         suppression_key = trigger.get("suppression_key") or f"{trigger_id}:{merchant_id}"
         if _suppressed(suppression_key, now_ts):
@@ -1741,17 +1611,6 @@ async def reply(body: ReplyBody):
                            merchant_name=display_name)
         CONVERSATIONS[body.conversation_id] = state
 
-    if is_auto_reply_message(body.message):
-        fingerprint = (body.merchant_id or "", _normalize(body.message))
-        AUTO_REPLY_FINGERPRINTS[fingerprint] = AUTO_REPLY_FINGERPRINTS.get(fingerprint, 0) + 1
-        if AUTO_REPLY_FINGERPRINTS[fingerprint] >= 2:
-            state["ended"] = True
-            state["mode"] = "ended"
-            return {
-                "action": "end",
-                "rationale": "Repeated WA-Business auto-reply detected across conversation ids; ending instead of spending another turn on an automated responder.",
-            }
-
     result = conv_respond(state, body.message)
 
     # anti-repetition guard (challenge-testing-brief.md §10 penalty: -2 per
@@ -1776,7 +1635,6 @@ async def teardown():
     CONVERSATIONS.clear()
     SUPPRESSION_LOG.clear()
     TRIGGERED_ALREADY.clear()
-    AUTO_REPLY_FINGERPRINTS.clear()
     return {"status": "wiped"}
 
 

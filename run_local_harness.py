@@ -121,14 +121,7 @@ def main():
         print(f"  batch {i//batch_size + 1}: {len(batch)} triggers -> {len(actions)} actions ({ms:.0f}ms)")
         all_actions.extend(actions)
 
-    # NOTE: 30/30 is the ceiling, not a strict requirement -- a canonical pair
-    # whose customer genuinely lacks the consent scope a trigger's kind
-    # requires is CORRECTLY declined (no action), by design (see bot.py's
-    # CONSENT_BY_TRIGGER_KIND gate). A handful of the generated (non-seed)
-    # customers in expanded/ won't have every scope, so a small number of
-    # misses here is expected and is the consent gate working, not a bug.
-    print(f"\n  total actions returned: {len(all_actions)} (up to 30; a customer-scope pair "
-          f"correctly produces no action if that customer lacks the required consent scope)")
+    print(f"\n  total actions returned: {len(all_actions)} (expect 30)")
 
     # map trigger_id -> test_id for submission.jsonl
     trg_to_test = {p["trigger_id"]: p["test_id"] for p in test_pairs}

@@ -1,36 +1,30 @@
 #!/usr/bin/env python3
 """Build the standalone deployment artifact from the modular source files."""
 
-import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 MODULES = ("contexts.py", "composer.py", "conversation_handlers.py", "bot.py")
-
-# Names of the local modules being concatenated. Any `from <name> import ...`
-# line referencing one of these is an inter-module import that becomes
-# unnecessary (and unresolvable, since there's no separate module file
-# anymore) once everything is pasted into one file, so it must be stripped.
-#
-# This is regex-based against the module *names*, not hardcoded against the
-# exact import statement text, on purpose: a previous version hardcoded the
-# literal statements (e.g. "from contexts import merchant_display_name,
-# parse_iso_date\n") and silently stopped matching the moment bot.py's actual
-# import line changed (e.g. gained new imported names), which shipped a
-# vera_bot_single_file.py that raised ModuleNotFoundError on standalone
-# import. A regex keyed on the module name can't drift out of sync the same
-# way -- it strips the import line whatever names it pulls in.
-LOCAL_MODULE_NAMES = ("contexts", "composer", "conversation_handlers")
-_LOCAL_IMPORT_RE = re.compile(
-    r"^from (?:" + "|".join(LOCAL_MODULE_NAMES) + r") import (?:\([^)]*\)|[^\n]*)\n",
-    re.MULTILINE,
+LOCAL_IMPORTS = (
+    "from contexts import (\n",
+    "from composer import compose\n",
+    "from conversation_handlers import respond as conv_respond, new_state\n",
+    "from contexts import merchant_display_name, parse_iso_date\n",
 )
 
 
 def strip_local_imports(source: str) -> str:
     source = source.replace("from __future__ import annotations\n", "")
-    return _LOCAL_IMPORT_RE.sub("", source)
+    for statement in LOCAL_IMPORTS:
+        if statement == "from contexts import (\n":
+            start = source.find(statement)
+            if start >= 0:
+                end = source.find(")\n", start) + 2
+                source = source[:start] + source[end:]
+        else:
+            source = source.replace(statement, "")
+    return source
 
 
 def main() -> None:

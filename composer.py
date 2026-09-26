@@ -93,21 +93,6 @@ def _sentence(text: str) -> str:
     return text
 
 
-def _sentence_lead_lower(text: str) -> str:
-    """Lowercase only the leading character, for gluing a title onto a prior
-    clause (e.g. '...trial found: {title}'). Deliberately does NOT lower()
-    the whole string: a blanket .lower() mangles any acronym appearing
-    anywhere in the title (RCT, DCI, GST, FSSAI, ...), which real research/
-    compliance digest titles routinely contain -- and which a freshly
-    judge-injected Phase-3 digest item is especially likely to contain,
-    since we can't predict its exact wording in advance. Every other family
-    that glues a digest title into prose (fam_regulation_change,
-    fam_cde_opportunity) already keeps the title verbatim; this brings
-    fam_research_digest in line with that instead of being the one place
-    that silently lowercases embedded acronyms."""
-    return (text[:1].lower() + text[1:]) if text else text
-
-
 def _default_template_params(merchant: dict, customer: Optional[dict]) -> list[str]:
     if customer:
         return [customer_first_name(customer), merchant_display_name(merchant)]
@@ -164,7 +149,7 @@ def fam_research_digest(category, merchant, trigger, customer):
         n_clause = f"{n:,}-patient trial" if n else "recent study"
         body = (
             f"{name}, this week's {category.get('display_name', category.get('slug'))} digest "
-            f"landed{segment_note}. {n_clause.capitalize()} found: {_sentence_lead_lower(item.get('title', ''))}. "
+            f"landed{segment_note}. {n_clause.capitalize()} found: {item.get('title', '').lower()}. "
             f"Worth a 2-min look — {item.get('source', '')}. "
             f"{L.want('Draft ek patient-ed WhatsApp bana doon jo aap share kar sakein?', 'Should I put together a patient-ed WhatsApp you can send out?')}"
         )
@@ -707,30 +692,13 @@ def fam_customer_lapsed(category, merchant, trigger, customer, hard: bool):
     cname = customer_first_name(customer) if customer else "there"
     mname = merchant_display_name(merchant)
     L = customer_lang(category, customer) if customer else Lang(False)
-    payload = g(trigger, "payload", default={}) or {}
+    last_visit = g(customer, "relationship", "last_visit") if customer else None
     offers = active_offers(merchant)
     offer = offers[0]["title"] if offers else None
-
-    # Prefer the trigger's own real, freshest field when it's actually
-    # present (e.g. trg_015_winback_rashmi ships payload.days_since_last_visit
-    # directly) rather than deriving an approximation from last_visit vs.
-    # trigger.expires_at -- expires_at is when the trigger LAPSES, not "now"
-    # (compose() has no direct access to the tick's clock), so that derived
-    # number was only ever a rough proxy and could drift from the real gap.
-    day_source = None
     days = None
-    real_days = payload.get("days_since_last_visit")
-    if isinstance(real_days, (int, float)) and not is_placeholder_payload(trigger):
-        days = int(real_days)
-        day_source = "trigger.payload.days_since_last_visit (real, freshest)"
-    else:
-        last_visit = g(customer, "relationship", "last_visit") if customer else None
-        if last_visit:
-            approx = days_between(last_visit, trigger.get("expires_at"))
-            if approx is not None:
-                days = approx
-                day_source = "approximated from customer.relationship.last_visit vs. trigger.expires_at (payload had no direct day count)"
-
+    if last_visit:
+        exp = trigger.get("expires_at")
+        days = days_between(last_visit, exp)
     miss_clause = f" — it's been about {days} days since your last visit" if days else ""
     if hard:
         body = (
@@ -748,7 +716,7 @@ def fam_customer_lapsed(category, merchant, trigger, customer, hard: bool):
             + f"{opener} "
             + closing
         )
-    rationale = (f"{'Hard' if hard else 'Soft'}-lapse winback; day count from {day_source or 'unresolvable — omitted rather than guessed'}, "
+    rationale = (f"{'Hard' if hard else 'Soft'}-lapse winback; real last_visit-derived day count when resolvable, "
                  f"real active offer ({'yes: ' + offer if offer else 'none — fell back to a plain re-engagement ask'}), "
                  "customer language_pref honored for code-mix. Single binary-leaning CTA.")
     return {"body": body, "cta": "binary" if offer else "open_ended", "rationale": rationale,
