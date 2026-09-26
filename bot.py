@@ -113,7 +113,7 @@ async def healthz():
 async def metadata():
     return {
         "team_name": "Vera 2.0",
-        "team_members": ["Claude (Anthropic)"],
+        "team_members": ["Divyansh Purohit"],
         "model": "deterministic-template-composer-v1 (no LLM in the hot path)",
         "approach": (
             "compose() dispatches by trigger.kind into ~25 family templates, each "
@@ -123,7 +123,7 @@ async def metadata():
             "hot paths -> deterministic, fast, zero hallucination risk by "
             "construction. See README.md for full rationale."
         ),
-        "contact_email": "team@example.com",
+        "contact_email": "purohitdivyansh302@gmail.com",
         "version": "1.0.0",
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
